@@ -34,7 +34,7 @@ def wrap_func(func):
 class Cron(object):
 
     def __init__(self, spec, func=None, args=(), start=False, uuid=None,
-                 loop=None, tz=None):
+                 loop=None, tz=None, once=False, unique=False, blocktask=False):
         self.spec = spec
         if func is not None:
             self.func = func if not args else functools.partial(func, *args)
@@ -43,6 +43,9 @@ class Cron(object):
         self.tz = get_localzone() if tz is None else tz
         self.cron = wrap_func(self.func)
         self.auto_start = start
+        self.once = once
+        self.unique = unique
+        self.blocktask = blocktask
         self.uuid = uuid if uuid is not None else uuid4()
         self.handle = self.future = self.croniter = None
         self.loop = loop if loop is not None else asyncio.get_event_loop()
@@ -86,12 +89,37 @@ class Cron(object):
             self.handle.cancel()
         next_time = self.get_next()
         self.handle = self.loop.call_at(next_time, self.call_next)
+        if self.unique and len(asyncio.all_tasks()) > 0:
+            return
+        if self.once:     
+            for onetask in asyncio.all_tasks():
+                if onetask.get_coro().__name__ == self.func.__name__:
+                    return
         self.call_func()
+
+    async def task_blocktask(self):
+        fp = functools.partial(self.func)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, fp)
 
     def call_func(self, *args, **kwargs):
         """Called. Take care of exceptions using gather"""
         """Check the version of python installed"""
-        if (sys.version_info[0:2] >= (3, 10)):
+        if (sys.version_info[0:2] >= (3, 10)) and self.blocktask:
+            futuretask = self.task_blocktask()
+            futuretask.__name__ = self.func.__name__
+            asyncio.gather(
+                self.task_blocktask(),
+                return_exceptions=True
+                ).add_done_callback(self.set_result)
+        elif self.blocktask:
+            futuretask = self.task_blocktask()
+            futuretask.__name__ = self.func.__name__
+            asyncio.gather(
+                futuretask,
+                loop=self.loop, return_exceptions=True,
+                ).add_done_callback(self.set_result)
+        elif (sys.version_info[0:2] >= (3, 10)):
             asyncio.gather(
                 self.cron(*args, **kwargs),
                 return_exceptions=True
@@ -130,5 +158,5 @@ class Cron(object):
         return '<Cron {0.spec} {0.func}>'.format(self)
 
 
-def crontab(spec, func=None, args=(), start=True, loop=None, tz=None):
-    return Cron(spec, func=func, args=args, start=start, loop=loop, tz=tz)
+def crontab(spec, func=None, args=(), start=True, loop=None, tz=None, once=False, unique=False, blocktask=False):
+    return Cron(spec, func=func, args=args, start=start, loop=loop, tz=tz, once=once, unique=unique, blocktask=blocktask)
